@@ -271,6 +271,9 @@ public class QrCodeDisplayManager : MonoBehaviour
         _activeModels[key] = model;
         _playingQrCodes.Add(key);
 
+        // Attach mood particles based on the QR key
+        AttachParticles(key, model.transform);
+
         var animator = model.GetComponentInChildren<Animator>();
         if (animator)
         {
@@ -284,6 +287,30 @@ public class QrCodeDisplayManager : MonoBehaviour
             Debug.LogWarning($"[QR] No Animator on '{key}', auto-destroy in 5s");
             StartCoroutine(DestroyAfterDelay(key, model, 5f));
         }
+    }
+
+    private static void AttachParticles(string qrKey, Transform parent)
+    {
+        // Guard: don't duplicate if particles already exist on this instance
+        string childName = qrKey switch
+        {
+            "wine_01" => "Wine01Particles",
+            "wine_02" => "Wine02Particles",
+            _ => null,
+        };
+
+        if (childName == null)
+            return;
+
+        if (parent.Find(childName))
+            return; // already attached
+
+        if (qrKey == "wine_01")
+            WineParticleFactory.CreateWine01Particles(parent);
+        else
+            WineParticleFactory.CreateWine02Particles(parent);
+
+        Debug.Log($"[QR] Attached '{childName}' to model for '{qrKey}'");
     }
 
     private IEnumerator PlayAnimationOnceAndDestroy(string key, GameObject model, Animator animator)
