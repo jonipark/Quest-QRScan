@@ -12,6 +12,7 @@ public class QrCodeDisplayManager : MonoBehaviour
     private readonly Dictionary<string, GameObject> _activeModels = new();
     private readonly HashSet<string> _playingQrCodes = new();
     private readonly Dictionary<string, float> _cooldownQrCodes = new();
+    private bool _isScanning;
 
     private enum QrRaycastMode
     {
@@ -40,6 +41,12 @@ public class QrCodeDisplayManager : MonoBehaviour
     private int _refreshCount;
     private async void RefreshMarkers()
     {
+        // Prevent concurrent async scans — this was causing race conditions
+        // where multiple in-flight ScanFrameAsync calls could resolve close together
+        // and duplicate-instantiate the model before _playingQrCodes was set.
+        if (_isScanning)
+            return;
+
         if (!_envRaycastManager || !_scanner)
         {
             if (_refreshCount++ % 300 == 0)
@@ -47,14 +54,24 @@ public class QrCodeDisplayManager : MonoBehaviour
             return;
         }
 
-        var qrResults = await _scanner.ScanFrameAsync();
+        _isScanning = true;
+        QrCodeResult[] qrResults;
+        try
+        {
+            qrResults = await _scanner.ScanFrameAsync();
+        }
+        finally
+        {
+            _isScanning = false;
+        }
+
         if (qrResults == null || qrResults.Length == 0)
         {
             CleanupInactiveMarkers();
             return;
         }
 
-        Debug.Log($"[QR DEBUG] Got {qrResults.Length} QR result(s) to display");
+        Debug.Log($"[QR DEBUG] Got {qrResults.Length} QR result(s) this frame (frame={Time.frameCount})");
         foreach (var qrResult in qrResults)
         {
             if (!TryBuildMarkerPose(qrResult, out var pose, out var scale))
@@ -65,11 +82,17 @@ public class QrCodeDisplayManager : MonoBehaviour
 
             if (modelPrefab)
             {
-                // Skip if animation is currently playing or in cooldown
+                // Skip if animation is currently playing — do NOT re-instantiate or reset
                 if (_playingQrCodes.Contains(qrResult.text))
+                {
+                    Debug.Log($"[QR DEBUG] Skipping '{qrResult.text}' — animation already playing (frame={Time.frameCount})");
                     continue;
+                }
                 if (_cooldownQrCodes.TryGetValue(qrResult.text, out var cooldownEnd) && Time.time < cooldownEnd)
+                {
+                    Debug.Log($"[QR DEBUG] Skipping '{qrResult.text}' — in cooldown until {cooldownEnd:F2} (now={Time.time:F2})");
                     continue;
+                }
                 _cooldownQrCodes.Remove(qrResult.text);
                 UpdateOrCreateModel(qrResult.text, pose);
             }
@@ -213,27 +236,48 @@ public class QrCodeDisplayManager : MonoBehaviour
     {
         if (_activeModels.TryGetValue(key, out var model) && model)
         {
-            // Already spawned and playing — just update position to track QR code
-            var targetPos = pose.position + pose.rotation * modelOffset;
-            model.transform.SetPositionAndRotation(targetPos, pose.rotation);
+            // Model already exists — do NOT update position/rotation every frame.
+            // Per-frame SetPositionAndRotation on the model root fights with the
+            // Animator when the clip has root-level keyframes, causing the animation
+            // to appear frozen or to reset each frame.
+            Debug.Log($"[QR DEBUG] Model already exists for '{key}', skipping position update (frame={Time.frameCount})");
             return;
         }
 
         // Spawn the full prefab (includes all child objects)
+        Debug.Log($"[QR DEBUG] === INSTANTIATING model for '{key}' at frame={Time.frameCount}, time={Time.time:F2} ===");
         model = Instantiate(modelPrefab);
         model.transform.localScale = modelScale;
         var spawnPos = pose.position + pose.rotation * modelOffset;
         model.transform.SetPositionAndRotation(spawnPos, pose.rotation);
+
+        // The 1_Final prefab has a MarkerController that auto-deactivates the
+        // GameObject after 2 seconds (designed for 2D marker overlays, not 3D models).
+        // Destroy it so it doesn't kill the model mid-animation.
+        var markerController = model.GetComponent<MarkerController>();
+        if (markerController)
+        {
+            Debug.Log($"[QR DEBUG] Removing MarkerController from model '{key}' (would auto-deactivate after 2s)");
+            Destroy(markerController);
+        }
+
         model.SetActive(true);
+        Debug.Log($"[QR DEBUG] Model SetActive(true) for '{key}' at pos={spawnPos}, rot={pose.rotation.eulerAngles}");
         _activeModels[key] = model;
         _playingQrCodes.Add(key);
-        Debug.Log($"[QR DEBUG] Spawned 3D model for '{key}'");
 
         // Play animation once, then destroy
         var animator = model.GetComponentInChildren<Animator>();
         if (animator)
         {
             animator.speed = 1f;
+            // Explicitly start the "Scene" state from normalizedTime=0.
+            // Without this, the Animator may not evaluate on the first frame after
+            // Instantiate+SetActive during an async callback mid-Update, leaving
+            // children at their prefab default scale (0,0,0).
+            animator.Play("Scene", 0, 0f);
+            animator.Update(0f);
+            Debug.Log($"[QR DEBUG] Animator found on '{key}': controller={animator.runtimeAnimatorController?.name}, speed={animator.speed}, forced Play('Scene',0,0)");
             StartCoroutine(PlayAnimationOnceAndDestroy(key, model, animator));
         }
         else
@@ -245,7 +289,6 @@ public class QrCodeDisplayManager : MonoBehaviour
 
     private IEnumerator PlayAnimationOnceAndDestroy(string key, GameObject model, Animator animator)
     {
-        // Get the clip length from the controller directly (no need to wait for animator init)
         var runtimeController = animator.runtimeAnimatorController;
         float clipLength = 0f;
         string clipName = null;
@@ -255,6 +298,7 @@ public class QrCodeDisplayManager : MonoBehaviour
             var clip = runtimeController.animationClips[0];
             clipLength = clip.length;
             clipName = clip.name;
+            Debug.Log($"[QR DEBUG] Controller '{runtimeController.name}' has {runtimeController.animationClips.Length} clip(s). Using '{clipName}' length={clipLength:F2}s");
         }
 
         if (clipLength <= 0f)
@@ -264,17 +308,43 @@ public class QrCodeDisplayManager : MonoBehaviour
         }
         else
         {
-            Debug.Log($"[QR DEBUG] Playing animation '{clipName}' ({clipLength}s) for '{key}'");
-            // Don't call animator.Play() — let the default state play automatically
-            // Just wait for the animation to finish
-            yield return new WaitForSeconds(clipLength);
+            Debug.Log($"[QR DEBUG] >>> Animation START '{clipName}' ({clipLength:F2}s) for '{key}' at time={Time.time:F2}, frame={Time.frameCount}");
+
+            // Let the default Animator state play — do NOT call animator.Play() or Rebind()
+            // which would restart it. Just wait for the full duration.
+            var startTime = Time.time;
+            var elapsed = 0f;
+            while (elapsed < clipLength)
+            {
+                // Safety: if the model was destroyed externally, bail out
+                if (!model || !animator)
+                {
+                    Debug.LogWarning($"[QR DEBUG] !!! Model or Animator destroyed externally for '{key}' at elapsed={elapsed:F2}s");
+                    yield break;
+                }
+
+                // Heartbeat every 2 seconds so we can verify the coroutine is alive
+                var newElapsed = Time.time - startTime;
+                if (Mathf.FloorToInt(newElapsed / 2f) > Mathf.FloorToInt(elapsed / 2f))
+                {
+                    var stateInfo = animator.GetCurrentAnimatorStateInfo(0);
+                    Debug.Log($"[QR DEBUG] ... heartbeat '{key}': elapsed={newElapsed:F2}/{clipLength:F2}s, " +
+                              $"animatorEnabled={animator.enabled}, modelActive={model.activeSelf}, " +
+                              $"stateHash={stateInfo.shortNameHash}, normalizedTime={stateInfo.normalizedTime:F3}");
+                }
+                elapsed = newElapsed;
+                yield return null;
+            }
+
+            Debug.Log($"[QR DEBUG] >>> Animation END '{clipName}' for '{key}' at time={Time.time:F2}, totalElapsed={elapsed:F2}s");
         }
 
-        Debug.Log($"[QR DEBUG] Animation done for '{key}' at time {Time.time}, destroying model");
+        Debug.Log($"[QR DEBUG] Destroying model for '{key}' at time={Time.time:F2}");
         if (model) Destroy(model);
         _activeModels.Remove(key);
         _playingQrCodes.Remove(key);
         _cooldownQrCodes[key] = Time.time + 3f;
+        Debug.Log($"[QR DEBUG] Cooldown set for '{key}' until {Time.time + 3f:F2}");
     }
 
     private IEnumerator DestroyAfterDelay(string key, GameObject model, float delay)
@@ -325,12 +395,13 @@ public class QrCodeDisplayManager : MonoBehaviour
             _activeMarkers.Remove(key);
         }
 
-        // Cleanup destroyed model references
+        // Cleanup destroyed model references (but do NOT remove models that are still playing)
         var modelKeysToRemove = new List<string>();
         foreach (var kvp in _activeModels)
         {
             if (!kvp.Value)
             {
+                Debug.LogWarning($"[QR DEBUG] CleanupInactiveMarkers: model for '{kvp.Key}' is null/destroyed — removing from _activeModels (playing={_playingQrCodes.Contains(kvp.Key)})");
                 modelKeysToRemove.Add(kvp.Key);
             }
         }
