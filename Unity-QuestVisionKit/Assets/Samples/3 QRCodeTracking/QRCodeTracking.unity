@@ -11663,7 +11663,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   raycastMode: 0
-  modelPrefab: {fileID: 7296697610620512204, guid: 0af5dd6d7aca64b259ddc13611adcc82, type: 3}
+  modelPrefab: {fileID: 7377839383484281707, guid: b4b472c43870048928d9673e60724598, type: 3}
   modelOffset: {x: 0, y: -0.2, z: 0.1}
   modelScale: {x: 0.6, y: 0.6, z: 0.6}
 --- !u!114 &7216147596602060347
