@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using Meta.XR;
@@ -8,14 +9,25 @@ public class QrCodeDisplayManager : MonoBehaviour
     private QrCodeScanner _scanner;
     private EnvironmentRaycastManager _envRaycastManager;
     private readonly Dictionary<string, MarkerController> _activeMarkers = new();
+    private readonly Dictionary<string, GameObject> _activeModels = new();
+    private readonly HashSet<string> _playingQrCodes = new();
+    private readonly Dictionary<string, float> _cooldownQrCodes = new();
 
     private enum QrRaycastMode
     {
         CenterOnly,
         PerCorner
     }
-    
+
     [SerializeField] private QrRaycastMode raycastMode = QrRaycastMode.PerCorner;
+
+    [Header("3D Model Display")]
+    [Tooltip("Optional 3D model prefab to spawn at the QR code location. If null, uses the default marker.")]
+    [SerializeField] private GameObject modelPrefab;
+    [Tooltip("Offset from the QR code center (local space).")]
+    [SerializeField] private Vector3 modelOffset = new Vector3(0, 0.1f, 0);
+    [Tooltip("Scale of the spawned model.")]
+    [SerializeField] private Vector3 modelScale = new Vector3(0.1f, 0.1f, 0.1f);
 
     private void Awake()
     {
@@ -25,10 +37,13 @@ public class QrCodeDisplayManager : MonoBehaviour
 
     private void Update() => RefreshMarkers();
 
+    private int _refreshCount;
     private async void RefreshMarkers()
     {
         if (!_envRaycastManager || !_scanner)
         {
+            if (_refreshCount++ % 300 == 0)
+                Debug.LogWarning($"[QR DEBUG] RefreshMarkers skipped: envRaycastManager={_envRaycastManager != null}, scanner={_scanner != null}");
             return;
         }
 
@@ -39,20 +54,36 @@ public class QrCodeDisplayManager : MonoBehaviour
             return;
         }
 
+        Debug.Log($"[QR DEBUG] Got {qrResults.Length} QR result(s) to display");
         foreach (var qrResult in qrResults)
         {
             if (!TryBuildMarkerPose(qrResult, out var pose, out var scale))
             {
+                Debug.LogWarning($"[QR DEBUG] TryBuildMarkerPose FAILED for '{qrResult.text}' (corners={qrResult.corners?.Length}, center raycast miss?)");
                 continue;
             }
 
-            var marker = GetOrCreateMarker(qrResult.text);
-            if (!marker)
+            if (modelPrefab)
             {
-                continue;
+                // Skip if animation is currently playing or in cooldown
+                if (_playingQrCodes.Contains(qrResult.text))
+                    continue;
+                if (_cooldownQrCodes.TryGetValue(qrResult.text, out var cooldownEnd) && Time.time < cooldownEnd)
+                    continue;
+                _cooldownQrCodes.Remove(qrResult.text);
+                UpdateOrCreateModel(qrResult.text, pose);
             }
-
-            marker.UpdateMarker(pose.position, pose.rotation, scale, qrResult.text);
+            else
+            {
+                var marker = GetOrCreateMarker(qrResult.text);
+                if (!marker)
+                {
+                    Debug.LogWarning($"[QR DEBUG] GetOrCreateMarker returned null for '{qrResult.text}' (MarkerPool empty?)");
+                    continue;
+                }
+                Debug.Log($"[QR DEBUG] Updating marker '{qrResult.text}' at {pose.position}");
+                marker.UpdateMarker(pose.position, pose.rotation, scale, qrResult.text);
+            }
         }
 
         CleanupInactiveMarkers();
@@ -121,24 +152,24 @@ public class QrCodeDisplayManager : MonoBehaviour
         pose = default;
         scale = default;
 
-        if (result?.corners == null || result.corners.Length < 4)
+        if (result?.corners == null || result.corners.Length < 3)
         {
             return false;
         }
 
-        var count = result.corners.Length;
-        var uvs = new Vector2[count];
-        for (var i = 0; i < count; i++)
+        // ZXing returns 3 finder pattern points for QR codes.
+        // Estimate the 4th corner: p3 = p0 + (p1 - p0) + (p2 - p0) (parallelogram)
+        var uvs = new Vector2[4];
+        for (var i = 0; i < result.corners.Length && i < 4; i++)
         {
             uvs[i] = new Vector2(result.corners[i].x, result.corners[i].y);
         }
-
-        var centerUV = Vector2.zero;
-        foreach (var uv in uvs)
+        if (result.corners.Length == 3)
         {
-            centerUV += uv;
+            uvs[3] = uvs[0] + (uvs[1] - uvs[0]) + (uvs[2] - uvs[0]);
         }
-        centerUV /= count;
+
+        var centerUV = (uvs[0] + uvs[1] + uvs[2] + uvs[3]) * 0.25f;
 
         var centerRay = BuildWorldRay(result, centerUV);
         if (!_envRaycastManager.Raycast(centerRay, out var centerHit))
@@ -146,12 +177,11 @@ public class QrCodeDisplayManager : MonoBehaviour
             return false;
         }
 
-        var center = centerHit.point;
-        var distance = Vector3.Distance(centerRay.origin, center);
+        var distance = Vector3.Distance(centerRay.origin, centerHit.point);
         var plane = new Plane(centerHit.normal, centerHit.point);
-        var worldCorners = new Vector3[count];
+        var worldCorners = new Vector3[4];
 
-        for (var i = 0; i < count; i++)
+        for (var i = 0; i < 4; i++)
         {
             var ray = BuildWorldRay(result, uvs[i]);
             if (raycastMode == QrRaycastMode.PerCorner && _envRaycastManager.Raycast(ray, out var cornerHit))
@@ -164,12 +194,7 @@ public class QrCodeDisplayManager : MonoBehaviour
             }
         }
 
-        center = Vector3.zero;
-        foreach (var c in worldCorners)
-        {
-            center += c;
-        }
-        center /= count;
+        var center = (worldCorners[0] + worldCorners[1] + worldCorners[2] + worldCorners[3]) * 0.25f;
 
         var up = (worldCorners[1] - worldCorners[0]).normalized;
         var right = (worldCorners[2] - worldCorners[1]).normalized;
@@ -182,6 +207,83 @@ public class QrCodeDisplayManager : MonoBehaviour
         scale = new Vector3(width * scaleFactor, height * scaleFactor, 1f);
         pose = new Pose(center, rotation);
         return true;
+    }
+
+    private void UpdateOrCreateModel(string key, Pose pose)
+    {
+        if (_activeModels.TryGetValue(key, out var model) && model)
+        {
+            // Already spawned and playing — just update position to track QR code
+            var targetPos = pose.position + pose.rotation * modelOffset;
+            model.transform.SetPositionAndRotation(targetPos, pose.rotation);
+            return;
+        }
+
+        // Spawn the full prefab (includes all child objects)
+        model = Instantiate(modelPrefab);
+        model.transform.localScale = modelScale;
+        var spawnPos = pose.position + pose.rotation * modelOffset;
+        model.transform.SetPositionAndRotation(spawnPos, pose.rotation);
+        model.SetActive(true);
+        _activeModels[key] = model;
+        _playingQrCodes.Add(key);
+        Debug.Log($"[QR DEBUG] Spawned 3D model for '{key}'");
+
+        // Play animation once, then destroy
+        var animator = model.GetComponentInChildren<Animator>();
+        if (animator)
+        {
+            animator.speed = 1f;
+            StartCoroutine(PlayAnimationOnceAndDestroy(key, model, animator));
+        }
+        else
+        {
+            Debug.LogWarning($"[QR DEBUG] No Animator found on model for '{key}', will auto-destroy in 5s");
+            StartCoroutine(DestroyAfterDelay(key, model, 5f));
+        }
+    }
+
+    private IEnumerator PlayAnimationOnceAndDestroy(string key, GameObject model, Animator animator)
+    {
+        // Get the clip length from the controller directly (no need to wait for animator init)
+        var runtimeController = animator.runtimeAnimatorController;
+        float clipLength = 0f;
+        string clipName = null;
+
+        if (runtimeController != null && runtimeController.animationClips.Length > 0)
+        {
+            var clip = runtimeController.animationClips[0];
+            clipLength = clip.length;
+            clipName = clip.name;
+        }
+
+        if (clipLength <= 0f)
+        {
+            Debug.LogWarning($"[QR DEBUG] No animation clips found for '{key}', destroying in 5s");
+            yield return new WaitForSeconds(5f);
+        }
+        else
+        {
+            Debug.Log($"[QR DEBUG] Playing animation '{clipName}' ({clipLength}s) for '{key}'");
+            // Don't call animator.Play() — let the default state play automatically
+            // Just wait for the animation to finish
+            yield return new WaitForSeconds(clipLength);
+        }
+
+        Debug.Log($"[QR DEBUG] Animation done for '{key}' at time {Time.time}, destroying model");
+        if (model) Destroy(model);
+        _activeModels.Remove(key);
+        _playingQrCodes.Remove(key);
+        _cooldownQrCodes[key] = Time.time + 3f;
+    }
+
+    private IEnumerator DestroyAfterDelay(string key, GameObject model, float delay)
+    {
+        yield return new WaitForSeconds(delay);
+        if (model) Destroy(model);
+        _activeModels.Remove(key);
+        _playingQrCodes.Remove(key);
+        _cooldownQrCodes[key] = Time.time + 3f;
     }
 
     private MarkerController GetOrCreateMarker(string key)
@@ -221,6 +323,20 @@ public class QrCodeDisplayManager : MonoBehaviour
         foreach (var key in keysToRemove)
         {
             _activeMarkers.Remove(key);
+        }
+
+        // Cleanup destroyed model references
+        var modelKeysToRemove = new List<string>();
+        foreach (var kvp in _activeModels)
+        {
+            if (!kvp.Value)
+            {
+                modelKeysToRemove.Add(kvp.Key);
+            }
+        }
+        foreach (var key in modelKeysToRemove)
+        {
+            _activeModels.Remove(key);
         }
     }
 #endif

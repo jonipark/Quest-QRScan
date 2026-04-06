@@ -57,14 +57,20 @@ public class QrCodeScanner : MonoBehaviour
     private void Awake()
     {
         _cameraAccess = GetComponent<PassthroughCameraAccess>();
-        
+        Debug.Log($"[QR DEBUG] PassthroughCameraAccess found: {_cameraAccess != null}");
+
         _downsampleShader = Resources.Load<ComputeShader>($"Downsample");
         if (_downsampleShader == null)
         {
             Debug.LogError("Downsample.compute not found in a Resources folder.");
         }
-        
+        else
+        {
+            Debug.Log("[QR DEBUG] Downsample shader loaded OK");
+        }
+
         _qrReader = new QRCodeReader();
+        Debug.Log("[QR DEBUG] QRCodeReader created OK");
     }
 
     private void OnDestroy()
@@ -76,31 +82,43 @@ public class QrCodeScanner : MonoBehaviour
 
     public async Task<QrCodeResult[]> ScanFrameAsync()
     {
-        if (_isScanning || !_downsampleShader) return Array.Empty<QrCodeResult>();
+        if (_isScanning || !_downsampleShader)
+        {
+            if (!_downsampleShader) Debug.LogWarning("[QR DEBUG] ScanFrameAsync skipped: downsample shader is null");
+            return Array.Empty<QrCodeResult>();
+        }
 
         _isScanning = true;
         try
         {
+            Debug.Log("[QR DEBUG] Acquiring frame...");
             var frame = await AcquireFrameAsync();
             if (frame == null)
             {
+                Debug.LogWarning("[QR DEBUG] Frame acquisition returned null");
                 return Array.Empty<QrCodeResult>();
             }
+            Debug.Log($"[QR DEBUG] Frame acquired: {frame.Value.Texture.width}x{frame.Value.Texture.height}");
 
             var (targetWidth, targetHeight) = GetTargetDimensions(frame.Value.Texture);
             if (!EnsureDownsampleTarget(targetWidth, targetHeight))
             {
+                Debug.LogWarning("[QR DEBUG] EnsureDownsampleTarget failed");
                 return Array.Empty<QrCodeResult>();
             }
 
+            Debug.Log($"[QR DEBUG] Dispatching downsample to {targetWidth}x{targetHeight}");
             DispatchDownsample(frame.Value.Texture, targetWidth, targetHeight);
             var grayBytes = await ReadPixelsAsync(_downsampledTexture);
             if (grayBytes == null || grayBytes.Length == 0)
             {
+                Debug.LogWarning("[QR DEBUG] GPU readback returned empty data");
                 return Array.Empty<QrCodeResult>();
             }
+            Debug.Log($"[QR DEBUG] Got {grayBytes.Length} gray bytes, decoding...");
 
             var decoded = await Task.Run(() => DecodeFrame(frame.Value, grayBytes, targetWidth, targetHeight));
+            Debug.Log($"[QR DEBUG] Decode result: {(decoded != null ? decoded.Length : 0)} QR code(s) found");
             return decoded ?? Array.Empty<QrCodeResult>();
         }
         finally
@@ -146,15 +164,26 @@ public class QrCodeScanner : MonoBehaviour
         return tcs.Task;
     }
 
+    private int _acquireAttempts;
     private async Task<CaptureFrame?> AcquireFrameAsync()
     {
+        _acquireAttempts = 0;
         while (true)
         {
+            _acquireAttempts++;
+            if (_acquireAttempts % 60 == 1)
+            {
+                Debug.Log($"[QR DEBUG] AcquireFrame attempt {_acquireAttempts}: " +
+                          $"cameraAccess={_cameraAccess != null}, " +
+                          $"IsPlaying={(_cameraAccess ? _cameraAccess.IsPlaying : false)}");
+            }
+
             if (_cameraAccess && _cameraAccess.IsPlaying)
             {
                 var texture = _cameraAccess.GetTexture();
                 if (texture)
                 {
+                    Debug.Log($"[QR DEBUG] Frame texture obtained after {_acquireAttempts} attempts");
                     return new CaptureFrame
                     {
                         Texture = texture,
@@ -162,6 +191,10 @@ public class QrCodeScanner : MonoBehaviour
                         Intrinsics = _cameraAccess.Intrinsics,
                         Resolution = _cameraAccess.CurrentResolution
                     };
+                }
+                else if (_acquireAttempts % 60 == 1)
+                {
+                    Debug.LogWarning("[QR DEBUG] IsPlaying=true but GetTexture() returned null");
                 }
             }
             await Task.Delay(16);

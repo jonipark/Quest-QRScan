@@ -11596,7 +11596,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 09420e86413e14ef6a1192b572643886, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  markerPrefab: {fileID: 7985637374133528724, guid: f607a6951ee6b47e69cbb77c038044d6, type: 3}
+  markerPrefab: {fileID: 2605656293920529119, guid: 5bde9f9c757d3cd49b9baa20a11e2cd6, type: 3}
   poolSize: 2
 --- !u!114 &1933871658830630678
 MonoBehaviour:
@@ -11612,6 +11612,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: meta.xr.mrutilitykit::Meta.XR.PassthroughCameraAccess
   CameraPosition: 0
   RequestedResolution: {x: 1280, y: 960}
+  _maxFramerate: 60
   TargetMaterial: {fileID: 0}
   _texturePropertyName: 
 --- !u!1 &3180484904599187134
@@ -11661,9 +11662,10 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 1516bc9b09ffb466f819a153f8024135, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  scanner: {fileID: 8475768769397855949}
-  envRaycastManager: {fileID: 6473000530874184150}
-  raycastMode: 1
+  raycastMode: 0
+  modelPrefab: {fileID: 7296697610620512204, guid: 0af5dd6d7aca64b259ddc13611adcc82, type: 3}
+  modelOffset: {x: 0, y: -0.2, z: 0.1}
+  modelScale: {x: 0.6, y: 0.6, z: 0.6}
 --- !u!114 &7216147596602060347
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -11694,8 +11696,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   sampleFactor: 2
   detectionMode: 0
-  downsampleShader: {fileID: 7200000, guid: 197eeaef5a6cb4347b600c9916e5dea8, type: 3}
-  cameraAccess: {fileID: 1933871658830630678}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0
